@@ -26,18 +26,7 @@ from tqdm import tqdm, trange
 # TODO: FineWebEdu
 # TODO: Use @wraps around func
 
-# for now, mixed precision toggle - BROKEN, KEEP OFF
-MP = False
-
 # ---------------- UTILS ----------------
-
-
-def mp_layer(x, layer):
-    dtype = x.dtype
-    x = x.cast(dtypes.bfloat16) if MP else x
-    out = layer(x).cast(dtype) if MP else layer(x)
-    return out
-
 
 def clip_grad_norm_(parameters, max_norm):
     norm = 0.0
@@ -141,9 +130,9 @@ class MLP:
         return [self.c_fc, self.c_proj]
 
     def __call__(self, x):
-        x = mp_layer(x, self.c_fc)
+        x = self.c_fc(x)
         x = x.gelu()
-        x = mp_layer(x, self.c_proj)
+        x = self.c_proj(x)
         return x
 
 
@@ -163,7 +152,7 @@ class Attention:
         dtype = x.dtype
 
         # q, k, v = self.c_attn(x).split(C, dim=-1)  # (B,T,3C) -> (B,T,C) x 3
-        q, k, v = mp_layer(x, self.c_attn).split(C, dim=-1)  # (B,T,3C) -> (B,T,C) x 3
+        q, k, v = self.c_attn(x).split(C, dim=-1)  # (B,T,3C) -> (B,T,C) x 3
         split_heads = lambda x: x.view(
             B, T, self.config.n_head, self.config.n_embd // self.config.n_head
         ).transpose(1, 2)
@@ -172,7 +161,7 @@ class Attention:
         y = q.scaled_dot_product_attention(k, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         # y = self.c_proj(y)
-        y = mp_layer(y, self.c_proj)
+        y = self.c_proj(y)
 
         return y
 
@@ -228,12 +217,9 @@ class GPT2:
                 param.weight.shape,
                 mean=0,
                 std=std,
-                dtype=(dtypes.bfloat16 if MP else dtypes.float32),
             )
             if param.bias is not None:
-                param.bias = Tensor.zeros_like(
-                    param.bias, dtype=(dtypes.bfloat16 if MP else dtypes.float32)
-                )
+                param.bias = Tensor.zeros_like(param.bias)
         elif isinstance(param, Embedding):
             param.weight = Tensor.normal(param.weight.shape, mean=0, std=0.02)
 
@@ -252,13 +238,13 @@ class GPT2:
         x = x.sequential(self.h)
 
         x = self.ln_f(x)
-        logits = mp_layer(x, self.lm_head)  # (B,T,C) -> (B,T,V)
+        logits = self.lm_head(x)  # (B,T,C) -> (B,T,V)
 
         if targets is not None:
             loss = logits.flatten(0, 1).sparse_categorical_crossentropy(
                 targets.flatten()
             )
-            return logits, loss.realize()
+            return logits, loss
 
         return logits, None
 
@@ -310,7 +296,7 @@ class GPT2:
 
 # ---------------- MULTI GPU ----------------
 
-GPUS = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 2))]
+GPUS = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 1))]
 NUM_GPUS = len(GPUS)
 
 # ---------------- DATA LOADER ----------------
@@ -328,7 +314,7 @@ class DataLoaderLite:
 
         enc = tiktoken.get_encoding("gpt2")
 
-        tokens = enc.encode(text)[:2050]
+        tokens = enc.encode(text)
         self.tokens = Tensor(tokens, dtype=dtypes.long)
 
         print(f"loaded {len(self.tokens)} tokens")
@@ -403,12 +389,11 @@ print(f"grad_accum_steps = {grad_accum_steps}")
 
 
 tokenizer = tiktoken.get_encoding("gpt2")
-dl = DataLoaderLite(B, T, "data/text/shake.txt")
+dl = DataLoaderLite(B, T, "datasets/shake.txt")
 model = GPT2(GPT2Small(vocab_size=50304))
 for k, x in get_state_dict(model).items():
     x.to_(GPUS)
-# optim_group = create_optimizers(get_parameters(model), **optim_args)
-optim_group = AdamW(get_parameters(model), **optim_args)
+optim_group = create_optimizers(get_parameters(model), **optim_args)
 
 # ---------------- LR ----------------
 
@@ -459,15 +444,15 @@ def train_step():
     return loss
 
 
-for step in range(num_epochs):
+for step in range(max_steps):
     last_step = step == max_steps - 1
-    if (step > 0 and step % 10 == 0) or last_step:
-        model.generate(
-            "For that, being one o' ",
-            tokenizer,
-            max_length=30,
-            num_return_sequences=2,
-        )
+    # if (step > 0 and step % 10 == 0) or last_step:
+    #     model.generate(
+    #         "For that, being one o' ",
+    #         tokenizer,
+    #         max_length=30,
+    #         num_return_sequences=2,
+    #     )
     t0 = time.perf_counter()
     Tensor.training = True
     Tensor.no_grad = False
@@ -477,15 +462,14 @@ for step in range(num_epochs):
         full_batch_loss = full_batch_loss + loss
     # norm = clip_grad_norm_(get_parameters(model), 1.0)
     lr = get_lr(step)
-    optim_group.lr = lr
-    # for optim in optim_group.optimizers:
-    #     optim.lr = lr
+    for optim in optim_group.optimizers:
+        optim.lr = lr
     optim_group.step()
     t1 = time.perf_counter()
-    dt = t1 - t0
-    tokens_per_sec = (dl.B * dl.T * grad_accum_steps * NUM_GPUS) / dt
+    dt = (t1 - t0)*1000
+    tokens_per_sec = (dl.B * dl.T * grad_accum_steps * NUM_GPUS) / (t1-t0)
     print(
-        f"step: {step} | lr: {lr:.5f} | loss {full_batch_loss.item()} | dt: {dt*1000:.2f}ms | tokens/sec: {tokens_per_sec:.2f}"
+        f"step: {step} | lr: {lr:.5f} | loss {full_batch_loss.item()} | dt: {dt:.2f}ms | tokens/sec: {tokens_per_sec:.2f}"
     )
     with open(log_file, "a") as f:
         f.write(f"{step} train {full_batch_loss.item():.6f}\n")
