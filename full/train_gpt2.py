@@ -300,13 +300,7 @@ class DataLoaderLite:
 
         self.batch = lambda x: x.reshape(B, T)
 
-        with open(file_path, "r") as f:
-            text = f.read()
-
         enc = tiktoken.get_encoding("gpt2")
-
-        tokens = enc.encode(text)
-        self.tokens = np.array(tokens)
 
         data_root = "data"
         shards = os.listdir(data_root)
@@ -350,6 +344,7 @@ class DataLoaderLite:
 
 GPUS = [f"{Device.DEFAULT}:{i}" for i in range(os.getenv("GPUS"))]
 NUM_GPUS = os.getenv("GPUS")
+
 total_batch_size = 2**19
 B = 16
 T = 1024
@@ -357,9 +352,12 @@ assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B
 grad_accum_steps = total_batch_size // (B * T)
 print(f"full batch size: {total_batch_size}, grad_accum_steps: {grad_accum_steps}")
 
-model = GPT2(GPT2Small)
-optim = configure_optimizers(get_parameters(model), 3e-4, .9, .95, 1e-8, .1)
 dl = DataLoaderLite(4, 128, "datasets/shake.txt")
+model = GPT2(GPT2Small)
+for k, x in get_state_dict(model).items():
+    x.to_(GPUS)
+
+optim = configure_optimizers(get_parameters(model), 3e-4, .9, .95, 1e-8, .1)
 
 # --------- TRAINING ---------
 
