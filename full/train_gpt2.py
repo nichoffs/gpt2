@@ -1,58 +1,23 @@
-import os
-import math
-import time
-from dataclasses import dataclass
-from os import getenv
-from sys import exit  # for debugging
+# --------- IMPORTS ---------
 
-import matplotlib.pyplot as plt
+import math
+import os
+from dataclasses import dataclass
+from sys import exit
+from time import perf_counter_ns
+
 import numpy as np
 import tiktoken
-from tinygrad import Device, Tensor, TinyJit, device, dtypes
+from tinygrad import Tensor, TinyJit, dtypes
 from tinygrad.helpers import fetch
 from tinygrad.nn import Embedding, LayerNorm, Linear
-from tinygrad.nn.optim import AdamW, OptimizerGroup
-from tinygrad.nn.state import (
-    get_parameters,
-    get_state_dict,
-    load_state_dict,
-    torch_load,
-)
+from tinygrad.nn.optim import AdamW, dedup, OptimizerGroup
+from tinygrad.nn.state import (get_parameters, get_state_dict, load_state_dict,
+                               torch_load)
 from tqdm import tqdm, trange
 
-# TODO: Mixed-precision - + expand attention if necessary to do mixed precision on dot
-# TODO: TF32?
-# TODO: Clip grad norm to 1
-# TODO: FineWebEdu
+# --------- UTILS ---------
 
-# for now, mixed precision toggle - BROKEN, KEEP OFF
-MP = False
-
-# ---------------- UTILS ----------------
-
-
-def mp_layer(x, layer):
-    dtype = x.dtype
-    x = x.cast(dtypes.bfloat16) if MP else x
-    out = layer(x).cast(dtype) if MP else layer(x)
-    return out
-
-
-def clip_grad_norm_(parameters, max_norm):
-    norm = sum(
-        param.grad.detach().pow(2).sum()
-        for param in parameters
-        if param.grad is not None
-    ).sqrt()
-    clip_coef = Tensor.minimum(max_norm / (norm + 1e-6), 1.0)
-
-    for param in parameters:
-        param.grad = param.grad * clip_coef if param.grad is not None else param.grad
-
-    return norm
-
-
-# taken from https://github.com/tinygrad/tinygrad/blob/97b05f567e8e42a2475f8a063fb080b200f6f033/extra/models/mask_rcnn.py
 def topk(input_, k, device, dim=-1, largest=True, sorted=False):
     k = min(k, input_.shape[dim] - 1)
     input_ = input_.numpy()
@@ -64,7 +29,7 @@ def topk(input_, k, device, dim=-1, largest=True, sorted=False):
     ind = np.take(ind, np.arange(k), axis=dim)  # k non-sorted indices
     input_ = np.take_along_axis(input_, ind, axis=dim)  # k non-sorted values
     if not sorted:
-        return Tensor(input_, device=device), Tensor(ind, device=device)
+        return Tensor(input_), Tensor(ind)
     if largest:
         input_ *= -1
     ind_part = np.argsort(input_, axis=dim)
@@ -72,16 +37,76 @@ def topk(input_, k, device, dim=-1, largest=True, sorted=False):
     if largest:
         input_ *= -1
     val = np.take_along_axis(input_, ind_part, axis=dim)
-    return Tensor(val, device=device), Tensor(ind, device=device)
+    return Tensor(val), Tensor(ind)
+
+def clip_grad_norm(optimizer):
+    global_norm = Tensor([0.0], dtype=dtypes.float32).realize()
+    for i, p in enumerate(optimizer.params):
+        global_norm += p.grad.float().square().sum()
+    global_norm = global_norm.sqrt()
+    for i, p in enumerate(optimizer.params): p.grad = (p.grad / Tensor.where(global_norm > 1.0, global_norm, 1.0)).cast(p.grad.dtype)
+    return global_norm
+
+# learning rate scheduler
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_steps = 10
+max_steps = 50
+
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_steps:
+        return max_lr * (it + 1) / warmup_steps
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > max_steps:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (
+        1.0 + math.cos(math.pi * decay_ratio)
+    )  # coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
+
+def configure_optimizers(parameters, lr, b1, b2, eps, wd):
+    # TODO: do I need to include requires_grad for the count to be correct?
+    # Think about this when adding bias for attention
+
+    params_nodecay = [
+        param
+        for param in parameters
+        if len(param.shape) < 2 and (param.requires_grad or param.requires_grad is None)
+    ]
+    params_decay = [
+        param
+        for param in parameters
+        if len(param.shape) >= 2
+        and (param.requires_grad or param.requires_grad is None)
+    ]
+
+    opt_decay = AdamW(params_decay, lr=lr, b1=b1, b2=b2, eps=eps, weight_decay=wd)
+    opt_nodecay = AdamW(params_nodecay, lr=lr, b1=b1, b2=b2, eps=eps, weight_decay=0)
+
+    num_params_decay = sum(param.numel() for param in opt_decay.params)
+    num_params_nodecay = sum(param.numel() for param in opt_nodecay.params)
+
+    print(
+        f"num decay params: {num_params_decay} num nodecay params: {num_params_nodecay}"
+    )
+
+    optim_group = OptimizerGroup(opt_decay, opt_nodecay)
+
+    return optim_group
 
 
-# ---------------- GPT CONFIG ----------------
+
+# --------- CONFIG ---------
 
 
 @dataclass
 class GPT2Config:
     block_size: int = 1024
-    vocab_size: int = 50257
+    vocab_size: int = 50304
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
@@ -121,7 +146,7 @@ MODEL_CONFIGS = {
     "gpt2-xl": GPT2XL,
 }
 
-# --------------- MODEL ----------------
+# --------- MODEL DEFINITIONS ---------
 
 
 class MLP:
@@ -135,9 +160,8 @@ class MLP:
         return [self.c_fc, self.c_proj]
 
     def __call__(self, x):
-        x = mp_layer(x, self.c_fc)
-        x = x.gelu()
-        x = mp_layer(x, self.c_proj)
+        x = self.c_fc(x).gelu()
+        x = self.c_proj(x)
         return x
 
 
@@ -154,10 +178,8 @@ class Attention:
 
     def __call__(self, x):
         B, T, C = x.shape
-        dtype = x.dtype
 
-        # q, k, v = self.c_attn(x).split(C, dim=-1)  # (B,T,3C) -> (B,T,C) x 3
-        q, k, v = mp_layer(x, self.c_attn).split(C, dim=-1)  # (B,T,3C) -> (B,T,C) x 3
+        q, k, v = self.c_attn(x).split(C, dim=-1)  # (B,T,3C) -> (B,T,C) x 3
         split_heads = lambda x: x.view(
             B, T, self.config.n_head, self.config.n_embd // self.config.n_head
         ).transpose(1, 2)
@@ -165,8 +187,7 @@ class Attention:
 
         y = q.scaled_dot_product_attention(k, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        # y = self.c_proj(y)
-        y = mp_layer(y, self.c_proj)
+        y = self.c_proj(y)
 
         return y
 
@@ -189,7 +210,7 @@ class TransformerBlock:
 
 
 class GPT2:
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config: GPT2Config = GPT2Small):
         self.config = config
 
         self.wte = Embedding(config.vocab_size, config.n_embd)
@@ -202,7 +223,6 @@ class GPT2:
         for param in self.parameters:
             self.init_weights(param)
 
-        # tie weights - HUGE SAVINGS
         self.lm_head.weight = self.wte.weight
 
     @property
@@ -212,76 +232,32 @@ class GPT2:
             parameters.extend(block.parameters)
         return parameters
 
-    def init_weights(self, param):
-        if isinstance(param, Linear):
-            std = 0.02
-            # apply residual scaling
-            if hasattr(param, "RESIDUAL_SCALE"):
-                std *= (2 * self.config.n_layer) ** -0.5
-            param.weight = Tensor.normal(
-                param.weight.shape,
-                mean=0,
-                std=std,
-                dtype=(dtypes.bfloat16 if MP else dtypes.float32),
-            )
-            if param.bias is not None:
-                param.bias = Tensor.zeros_like(
-                    param.bias, dtype=(dtypes.bfloat16 if MP else dtypes.float32)
-                )
-        elif isinstance(param, Embedding):
-            param.weight = Tensor.normal(param.weight.shape, mean=0, std=0.02)
-
     def __call__(self, idx, targets=None):
         B, T = idx.shape
 
         assert (
             T <= self.config.block_size
         ), f"Cannot forward, model block size is {self.config.block_size} but got sequence of length {T}"
-        pos = Tensor.arange(0, T, dtype=dtypes.long, device=GPUS)  # (T,)
+        pos = Tensor.arange(0, T, dtype=dtypes.long)  # (T,)
         pos_emb = self.wpe(pos)  # (T,) -> (T,C)
         tok_emb = self.wte(idx)  # (B,T) -> (B,T,C)
 
         x = tok_emb + pos_emb
-        dtype = x.dtype
         x = x.sequential(self.h)
 
         x = self.ln_f(x)
-        logits = mp_layer(x, self.lm_head)  # (B,T,C) -> (B,T,V)
+        logits = self.lm_head(x)  # (B,T,C) -> (B,T,V)
 
         if targets is not None:
             loss = logits.flatten(0, 1).sparse_categorical_crossentropy(
                 targets.flatten()
             )
-            return logits, loss.realize()
+            return logits, loss
 
         return logits, None
 
-    def generate(self, prompt: str, tokenizer, max_length, num_return_sequences):
-        tokens = tokenizer.encode(prompt)
-        x = (
-            Tensor(tokens, dtype=dtypes.long, device=GPUS)
-            .unsqueeze(0)
-            .repeat(num_return_sequences, 1)
-        )
-        Tensor.no_grad = True
-        Tensor.training = False
-        while x.shape[1] < max_length:
-            logits, _ = self(x)
-            logits = logits[:, -1, :]
-            probs = logits.softmax(-1)
-            topk_probs, topk_indices = topk(probs, 50, GPUS, dim=-1)
-            ix = topk_probs.multinomial(1)
-            xcol = topk_indices.gather(-1, ix)
-            x = x.cat(xcol, dim=1)
-
-        for i in range(num_return_sequences):
-            tokens = x[i, :max_length].numpy().tolist()
-            decoded = tokenizer.decode(tokens)
-            print(">", decoded)
-
     @staticmethod
     def build(MODEL_NAME):
-        model = GPT2(MODEL_CONFIGS[MODEL_NAME])
         weights = torch_load(
             fetch(f"https://huggingface.co/{MODEL_NAME}/resolve/main/pytorch_model.bin")
         )
@@ -297,207 +273,93 @@ class GPT2:
                 weights[k] = weights[k].T
 
         weights["lm_head.weight"] = weights["wte.weight"]
+        model = GPT2(MODEL_CONFIGS[MODEL_NAME])
         load_state_dict(model, weights)
 
         return model
 
+    def init_weights(self, param):
+        if isinstance(param, Linear):
+            std = 0.02
+            if hasattr(param, "RESIDUAL_SCALING"):
+                std *= (2 * self.config.n_layer) ** -0.5
+            param.weight = Tensor.normal(
+                param.weight.shape,
+                mean=0,
+                std=std,
+            )
+            if param.bias is not None:
+                param.bias = Tensor.zeros_like(param.bias)
+        elif isinstance(param, Embedding):
+            param.weight = Tensor.normal(param.weight.shape, mean=0, std=0.02)
 
-# ---------------- MULTI GPU ----------------
 
-GPUS = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 4))]
-NUM_GPUS = len(GPUS)
-
-# ---------------- DATA LOADER ----------------
-
-
-def load_tokens(filename):
-    npt = np.load(filename)
-    npt = npt.astype(np.int32)  # added after video
-    ptt = Tensor(npt, dtype=dtypes.long)
-    return ptt
+# --------- DATALOADER ---------
 
 
 class DataLoaderLite:
-    def __init__(self, B, T, split):
+    def __init__(self, B, T, file_path):
         self.B = B
         self.T = T
-        assert split in {"train", "val"}
 
-        self.batch = lambda x: x.view(B, T)
+        self.batch = lambda x: x.reshape(B, T)
+
+        with open(file_path, "r") as f:
+            text = f.read()
 
         enc = tiktoken.get_encoding("gpt2")
 
-        # print(f"loaded {len(self.tokens)} tokens")
-        # print(f"1 epoch = {len(self.tokens) // (B*T)} batches")
+        tokens = enc.encode(text)
+        self.tokens = np.array(tokens)
 
-        data_root = "data"
-        shards = os.listdir(data_root)
-        shards = [s for s in shards if split in s]
-        shards = sorted(shards)
-        shards = [os.path.join(data_root, s) for s in shards]
-        self.shards = shards
-        assert len(shards) > 0, f"no shards found for split {split}"
-        print(f"found {len(shards)} shards for split {split}")
-        self.reset()
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B*T)} batches")
 
-    def reset(self):
-        # state, init at shard zero
-        self.current_shard = 0
-        self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = 0
 
     def next_batch(self):
         B, T = self.B, self.T
 
         buf = self.tokens[self.current_position : self.current_position + B * T + 1]
-        x = self.batch(buf[:-1]).shard_(GPUS, axis=0)
-        y = self.batch(buf[1:]).shard_(GPUS, axis=0)
-        self.current_position += B * T * NUM_GPUS
+        x = self.batch(buf[:-1])
+        y = self.batch(buf[1:])
+        self.current_position += B * T
 
-        if self.current_position + (B * T * NUM_GPUS + 1) > len(self.tokens):
-            # print("read entire document, resetting position...")
-            self.current_shard = (self.current_shard + 1) % len(self.shards)
-            self.tokens = load_tokens(self.shards[self.current_shard])
+        if self.current_position + (B * T + 1) > len(self.tokens):
+            print("read entire document, resetting position...")
             self.current_position = 0
 
         return x, y
 
 
-# ---------------- OPTIMIZER ----------------
+# --------- INITIALIZATION ---------
 
+model = GPT2(GPT2Small)
+optim = configure_optimizers(get_parameters(model), 3e-4, .9, .95, 1e-8, .1)
+dl = DataLoaderLite(4, 128, "datasets/shake.txt")
 
-def create_optimizers(parameters, **optim_args):
-    # TODO: do I need to include requires_grad for the count to be correct?
-    # Think about this when adding bias for attention
-
-    params_nodecay = [
-        param
-        for param in parameters
-        if len(param.shape) < 2 and (param.requires_grad or param.requires_grad is None)
-    ]
-    params_decay = [
-        param
-        for param in parameters
-        if len(param.shape) >= 2
-        and (param.requires_grad or param.requires_grad is None)
-    ]
-    # I believe this is double counting embedding since wte and lm_head tied
-    num_params_decay = sum(param.numel() for param in params_decay)
-    num_params_nodecay = sum(param.numel() for param in params_nodecay)
-    print(
-        f"num decay params: {num_params_decay} num nodecay params: {num_params_nodecay}"
-    )
-    opt_decay = AdamW(params_decay, **optim_args, weight_decay=0.1)
-    opt_nodecay = AdamW(params_nodecay, **optim_args, weight_decay=0)
-
-    optim_group = OptimizerGroup(opt_decay, opt_nodecay)
-
-    return optim_group
-
-
-# ---------------- INITIALIZATION ----------------
-
-B = 64
-T = 1024
-total_batch_size = 2**19  # ~.5M, measured in tokens
-num_epochs = 100
-optim_args = {
-    "lr": 6e-4,
-    "b1": 0.9,
-    "b2": 0.95,
-    "eps": 1e-8,
-}
-
-# grad accum
-assert total_batch_size % (B * T) == 0, "total batch size must be divisible by B*T"
-grad_accum_steps = total_batch_size // (B * T)
-print(f"grad_accum_steps = {grad_accum_steps}")
-
-
-tokenizer = tiktoken.get_encoding("gpt2")
-dl = DataLoaderLite(B=B, T=T, split="train")
-model = GPT2(GPT2Small(vocab_size=50304))
-for k, x in get_state_dict(model).items():
-    x.to_(GPUS)
-optim_group = create_optimizers(model, **optim_args)
-
-
-# ---------------- LR ----------------
-
-
-max_lr = 6e-4
-min_lr = max_lr * 0.1
-warmup_steps = 715
-max_steps = (
-    19073  # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
-)
-
-
-def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
-    if it < warmup_steps:
-        return max_lr * (it + 1) / warmup_steps
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it > max_steps:
-        return min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (
-        1.0 + math.cos(math.pi * decay_ratio)
-    )  # coeff starts at 1 and goes to 0
-    return min_lr + coeff * (max_lr - min_lr)
-
-
-# ---------------- LOGGING ----------------
-
-log_dir = "log"
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"log.txt")
-with open(log_file, "w") as f:  # open for writing to clear the file
-    pass
-
-
-# ---------------- TRAINING ----------------
-
+# --------- TRAINING ---------
 
 @TinyJit
-def train_step():
+def train_step(x, y):
+    with Tensor.train():
+        optim.zero_grad()
+        logits, loss = model(x, y)
+        loss.backward()
+        # norm = clip_grad_norm(optim)
+        optim.step()
+        return loss.realize(), 0
+
+
+for step in (t := trange(max_steps)):
+    t0 = perf_counter_ns()
     x, y = dl.next_batch()
-    optim_group.zero_grad()
-    logits, loss = model(x, y)
-    loss = loss / grad_accum_steps
-    loss.backward()
-    return loss
-
-
-losses = []
-for step in range(num_epochs):
-    last_step = step == max_steps - 1
-    if (step > 0 and step % 100 == 0) or last_step:
-        model.generate(
-            "For that, being one o' ",
-            tokenizer,
-            max_length=30,
-            num_return_sequences=2,
-        )
-    t0 = time.perf_counter()
-    Tensor.training = True
-    Tensor.no_grad = False
-    full_batch_loss = Tensor([0], device=GPUS, requires_grad=True)
-    for micro_step in range(grad_accum_steps):
-        loss = train_step()
-        full_batch_loss = full_batch_loss + loss
-    # norm = clip_grad_norm_(get_parameters(model), 1.0)
     lr = get_lr(step)
-    for optim in optim_group.optimizers:
-        optim.lr = lr
-    optim_group.step()
-    t1 = time.perf_counter()
-    dt = t1 - t0
-    tokens_per_sec = (dl.B * dl.T * grad_accum_steps * NUM_GPUS) / dt
-    print(
-        f"step: {step} | lr: {lr:.5f} | loss: {full_batch_loss.item()} | norm: {norm} | dt: {dt*1000:.2f}ms | tokens/sec: {tokens_per_sec:.2f}"
+    for opt in optim.optimizers:
+        opt.lr = lr
+    loss, norm = train_step(Tensor(x, dtype=dtypes.long), Tensor(y, dtype=dtypes.long))
+    loss = loss.item()
+    dt = (perf_counter_ns() - t0) * 1e-6
+    t.set_description(
+        f"train loss: {loss:.2f} | dt: {dt:.2f} | tok/s {(dl.B*dl.T)/(dt*1e-3):.2f} | lr: {lr:.5f} | norm: {norm:.2f}"
     )
-    with open(log_file, "a") as f:
-        f.write(f"{step} train {full_batch_loss.item():.6f}\n")

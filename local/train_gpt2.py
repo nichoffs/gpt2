@@ -338,7 +338,6 @@ model = GPT2(GPT2Small)
 optim = configure_optimizers(get_parameters(model), 3e-4, .9, .95, 1e-8, .1)
 dl = DataLoaderLite(4, 128, "datasets/shake.txt")
 
-
 # --------- TRAINING ---------
 
 @TinyJit
