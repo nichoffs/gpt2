@@ -8,3 +8,4 @@
 - [ ] Distributed Data Parallel
 - [ ] FineWeb
 - [ ] HellaSwag Eval
+- [ ] Validation Loss
