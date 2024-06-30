@@ -1,5 +1,3 @@
-# --------- IMPORTS ---------
-
 import math
 import os
 from dataclasses import dataclass
@@ -8,7 +6,7 @@ from time import perf_counter_ns
 
 import numpy as np
 import tiktoken
-from tinygrad import Tensor, TinyJit, dtypes
+from tinygrad import Tensor, TinyJit, dtypes, Device
 from tinygrad.helpers import fetch
 from tinygrad.nn import Embedding, LayerNorm, Linear
 from tinygrad.nn.optim import AdamW, dedup, OptimizerGroup
@@ -45,7 +43,6 @@ def clip_grad_norm(optimizer):
         global_norm += p.grad.float().square().sum()
     global_norm = global_norm.sqrt()
     for i, p in enumerate(optimizer.params): p.grad = (p.grad / Tensor.where(global_norm > 1.0, global_norm, 1.0)).cast(p.grad.dtype)
-    return global_norm
 
 # learning rate scheduler
 max_lr = 6e-4
@@ -95,7 +92,6 @@ def configure_optimizers(parameters, lr, b1, b2, eps, wd):
     )
 
     optim_group = OptimizerGroup(opt_decay, opt_nodecay)
-
     return optim_group
 
 
@@ -298,7 +294,7 @@ class GPT2:
 
 
 class DataLoaderLite:
-    def __init__(self, B, T, file_path):
+    def __init__(self, B, T, file_path, split="train"):
         self.B = B
         self.T = T
 
@@ -312,27 +308,54 @@ class DataLoaderLite:
         tokens = enc.encode(text)
         self.tokens = np.array(tokens)
 
-        print(f"loaded {len(self.tokens)} tokens")
-        print(f"1 epoch = {len(self.tokens) // (B*T)} batches")
+        data_root = "data"
+        shards = os.listdir(data_root)
+        shards = sorted([s for s in shards if split in s])
+        self.shards = [os.path.join(data_root, s) for s in shards]
+        assert len(shards) > 0, f"no shards found for split {split}"
+        print(f"found {len(shards)} shards for split {split}")
+        self.reset()
 
+        self.reset()
+
+    def load_tokens(self, filename):
+        npt = np.load(filename)
+        npt = npt.astype(np.int32)
+        ptt = Tensor(npt, dtype=dtypes.long)
+        return ptt
+
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = self.load_tokens(self.shards[self.current_shard])
         self.current_position = 0
 
     def next_batch(self):
         B, T = self.B, self.T
 
-        buf = self.tokens[self.current_position : self.current_position + B * T + 1]
-        x = self.batch(buf[:-1])
-        y = self.batch(buf[1:])
-        self.current_position += B * T
+        buf = self.tokens[self.current_position : (self.current_position + B * T * NUM_GPUS) + 1]
+        x = self.batch(buf[:-1]).shard_(GPUS, axis=0)
+        y = self.batch(buf[1:]).shard_(GPUS, axis=0)
+        self.current_position += B * T * NUM_GPUS
 
-        if self.current_position + (B * T + 1) > len(self.tokens):
-            print("read entire document, resetting position...")
+        if self.current_position + (B * T * NUM_GPUS + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = self.load_tokens(self.shards[self.current_shard])
             self.current_position = 0
 
         return x, y
 
 
 # --------- INITIALIZATION ---------
+
+GPUS = [f"{Device.DEFAULT}:{i}" for i in range(os.getenv("GPUS"))]
+NUM_GPUS = os.getenv("GPUS")
+total_batch_size = 2**19
+B = 16
+T = 1024
+assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B*T"
+grad_accum_steps = total_batch_size // (B * T)
+print(f"full batch size: {total_batch_size}, grad_accum_steps: {grad_accum_steps}")
 
 model = GPT2(GPT2Small)
 optim = configure_optimizers(get_parameters(model), 3e-4, .9, .95, 1e-8, .1)
@@ -343,22 +366,23 @@ dl = DataLoaderLite(4, 128, "datasets/shake.txt")
 @TinyJit
 def train_step(x, y):
     with Tensor.train():
-        optim.zero_grad()
         logits, loss = model(x, y)
+        loss = loss / grad_accum_steps
         loss.backward()
-        # norm = clip_grad_norm(optim)
-        optim.step()
-        return loss.realize(), 0
+        return loss
 
 
 for step in (t := trange(max_steps)):
     t0 = perf_counter_ns()
-    x, y = dl.next_batch()
     lr = get_lr(step)
     for opt in optim.optimizers:
         opt.lr = lr
-    loss, norm = train_step(Tensor(x, dtype=dtypes.long), Tensor(y, dtype=dtypes.long))
-    loss = loss.item()
+    optim.zero_grad()
+    for micro_batch in range(grad_accum_steps):
+        x, y = dl.next_batch()
+        loss = train_step(Tensor(x, dtype=dtypes.long), Tensor(y, dtype=dtypes.long))
+    clip_grad_norm(optim)
+    optim.step()
     dt = (perf_counter_ns() - t0) * 1e-6
     t.set_description(
         f"train loss: {loss:.2f} | dt: {dt:.2f} | tok/s {(dl.B*dl.T)/(dt*1e-3):.2f} | lr: {lr:.5f} | norm: {norm:.2f}"
