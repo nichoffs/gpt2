@@ -1,3 +1,5 @@
 .DS_Store
 venv/
 pyrightconfig.json
+__pycache__/
+datasets/

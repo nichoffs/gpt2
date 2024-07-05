@@ -6,15 +6,20 @@ from time import perf_counter_ns
 
 import numpy as np
 import tiktoken
-from tinygrad import Tensor, TinyJit, dtypes, Device
+from tinygrad import Device, Tensor, TinyJit, dtypes
 from tinygrad.helpers import fetch
 from tinygrad.nn import Embedding, LayerNorm, Linear
-from tinygrad.nn.optim import AdamW, dedup, OptimizerGroup
-from tinygrad.nn.state import (get_parameters, get_state_dict, load_state_dict,
-                               torch_load)
+from tinygrad.nn.optim import AdamW, OptimizerGroup, dedup
+from tinygrad.nn.state import (
+    get_parameters,
+    get_state_dict,
+    load_state_dict,
+    torch_load,
+)
 from tqdm import tqdm, trange
 
 # --------- UTILS ---------
+
 
 def topk(input_, k, device, dim=-1, largest=True, sorted=False):
     k = min(k, input_.shape[dim] - 1)
@@ -27,7 +32,7 @@ def topk(input_, k, device, dim=-1, largest=True, sorted=False):
     ind = np.take(ind, np.arange(k), axis=dim)  # k non-sorted indices
     input_ = np.take_along_axis(input_, ind, axis=dim)  # k non-sorted values
     if not sorted:
-        return Tensor(input_), Tensor(ind)
+        return Tensor(input_, device=device), Tensor(ind, device=device)
     if largest:
         input_ *= -1
     ind_part = np.argsort(input_, axis=dim)
@@ -35,20 +40,16 @@ def topk(input_, k, device, dim=-1, largest=True, sorted=False):
     if largest:
         input_ *= -1
     val = np.take_along_axis(input_, ind_part, axis=dim)
-    return Tensor(val), Tensor(ind)
+    return Tensor(val, device=device), Tensor(ind, device=device)
 
-def clip_grad_norm(optimizer):
-    global_norm = Tensor([0.0], dtype=dtypes.float32).realize()
-    for i, p in enumerate(optimizer.params):
-        global_norm += p.grad.float().square().sum()
-    global_norm = global_norm.sqrt()
-    for i, p in enumerate(optimizer.params): p.grad = (p.grad / Tensor.where(global_norm > 1.0, global_norm, 1.0)).cast(p.grad.dtype)
 
 # learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10
 max_steps = 50
+val_steps = 20
+
 
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -64,6 +65,7 @@ def get_lr(it):
         1.0 + math.cos(math.pi * decay_ratio)
     )  # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
+
 
 def configure_optimizers(parameters, lr, b1, b2, eps, wd):
     # TODO: do I need to include requires_grad for the count to be correct?
@@ -93,7 +95,6 @@ def configure_optimizers(parameters, lr, b1, b2, eps, wd):
 
     optim_group = OptimizerGroup(opt_decay, opt_nodecay)
     return optim_group
-
 
 
 # --------- CONFIG ---------
@@ -206,14 +207,21 @@ class TransformerBlock:
 
 
 class GPT2:
-    def __init__(self, config: GPT2Config = GPT2Small):
+    def __init__(self, config: GPT2Config = GPT2Small, GPUS=f"{Device.DEFAULT}:0"):
         self.config = config
+
+        self.GPUS = GPUS
+        self.NUM_GPUS = len(self.GPUS)
 
         self.wte = Embedding(config.vocab_size, config.n_embd)
         self.wpe = Embedding(config.block_size, config.n_embd)
         self.h = [TransformerBlock(config) for _ in range(config.n_layer)]
         self.ln_f = LayerNorm(config.n_embd, config.norm_eps)
         self.lm_head = Linear(config.n_embd, config.vocab_size, bias=False)
+
+        self.pos = Tensor.arange(
+            0, config.block_size, dtype=dtypes.long, requires_grad=False
+        )  # (T,)
 
         # init weights
         for param in self.parameters:
@@ -234,8 +242,7 @@ class GPT2:
         assert (
             T <= self.config.block_size
         ), f"Cannot forward, model block size is {self.config.block_size} but got sequence of length {T}"
-        pos = Tensor.arange(0, T, dtype=dtypes.long)  # (T,)
-        pos_emb = self.wpe(pos)  # (T,) -> (T,C)
+        pos_emb = self.wpe(self.pos.shrink(((0, T), None)))  # (T,) -> (T,C)
         tok_emb = self.wte(idx)  # (B,T) -> (B,T,C)
 
         x = tok_emb + pos_emb
@@ -274,6 +281,23 @@ class GPT2:
 
         return model
 
+    def generate(self, enc, num_return_sequences, max_length):
+        tokens = enc.encode("Hello, I'm a language model,")
+        tokens = Tensor(tokens, dtype=dtypes.long, device=GPUS)
+        xgen = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        with Tensor.inference_mode():
+            while xgen.shape[1] < max_length:
+                logits = self(xgen)[0][:, -1, :]
+                probs = logits.softmax(-1)
+                topk_probs, topk_indices = topk(probs, 50, GPUS, -1)
+                ix = topk_probs.multinomial(1)
+                xcol = topk_indices.gather(-1, ix)
+                xgen = xgen.cat(xcol, dim=1)
+            for i in range(num_return_sequences):
+                tokens = xgen[i, :max_length].tolist()
+                decoded = enc.decode(tokens)
+                print(f"Sample {i + 1}: {decoded}")
+
     def init_weights(self, param):
         if isinstance(param, Linear):
             std = 0.02
@@ -290,15 +314,15 @@ class GPT2:
             param.weight = Tensor.normal(param.weight.shape, mean=0, std=0.02)
 
 
-# --------- DATALOADER ---------
-
-
-class DataLoaderLite:
-    def __init__(self, B, T, file_path, split="train"):
+class FineWebDataLoaderLite:
+    def __init__(self, B, T, file_path, split="train", GPUS=f"{Device.DEFAULT}:0"):
         self.B = B
         self.T = T
 
-        self.batch = lambda x: x.reshape(B, T)
+        self.GPUS = GPUS
+        self.NUM_GPUS = len(GPUS)
+
+        self.batch = lambda x: x.reshape(self.NUM_GPUS * B, T)
 
         enc = tiktoken.get_encoding("gpt2")
 
@@ -308,7 +332,6 @@ class DataLoaderLite:
         self.shards = [os.path.join(data_root, s) for s in shards]
         assert len(shards) > 0, f"no shards found for split {split}"
         print(f"found {len(shards)} shards for split {split}")
-        self.reset()
 
         self.reset()
 
@@ -327,12 +350,14 @@ class DataLoaderLite:
     def next_batch(self):
         B, T = self.B, self.T
 
-        buf = self.tokens[self.current_position : (self.current_position + B * T * NUM_GPUS) + 1]
-        x = self.batch(buf[:-1]).shard_(GPUS, axis=0)
-        y = self.batch(buf[1:]).shard_(GPUS, axis=0)
-        self.current_position += B * T * NUM_GPUS
+        buf = self.tokens[
+            self.current_position : (self.current_position + B * T * self.NUM_GPUS) + 1
+        ]
+        x = self.batch(buf[:-1]).shard_(self.GPUS, axis=0)
+        y = self.batch(buf[1:]).shard_(self.GPUS, axis=0)
+        self.current_position += B * T * self.NUM_GPUS
 
-        if self.current_position + (B * T * NUM_GPUS + 1) > len(self.tokens):
+        if self.current_position + (B * T * self.NUM_GPUS + 1) > len(self.tokens):
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.tokens = self.load_tokens(self.shards[self.current_shard])
             self.current_position = 0
@@ -340,48 +365,139 @@ class DataLoaderLite:
         return x, y
 
 
+class ShakespeareDataLoaderLite:
+    def __init__(self, B, T, file_path, GPUS=f"{Device.DEFAULT}:0"):
+        self.B = B
+        self.T = T
+
+        self.GPUS = GPUS
+        self.NUM_GPUS = len(GPUS)
+
+        self.batch = lambda x: x.reshape(self.NUM_GPUS * B, T)
+
+        with open(file_path, "r") as f:
+            text = f.read()
+
+        enc = tiktoken.get_encoding("gpt2")
+
+        tokens = enc.encode(text)
+        self.tokens = Tensor(tokens, dtype=dtypes.long)
+
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B*T)} batches")
+
+        self.current_position = 0
+
+    def next_batch(self):
+        B, T = self.B, self.T
+
+        buf = self.tokens[
+            self.current_position : (self.current_position + B * T * self.NUM_GPUS + 1)
+        ]
+        x = self.batch(buf[:-1]).shard_(self.GPUS, axis=0)
+        y = self.batch(buf[1:]).shard_(self.GPUS, axis=0)
+        self.current_position += B * T * self.NUM_GPUS
+
+        if self.current_position + (B * T * self.NUM_GPUS + 1) > len(self.tokens):
+            print("read entire document, resetting position...")
+            self.current_position = 0
+
+        return x, y
+
+
 # --------- INITIALIZATION ---------
 
-GPUS = [f"{Device.DEFAULT}:{i}" for i in range(os.getenv("GPUS"))]
-NUM_GPUS = os.getenv("GPUS")
+GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1)]
+NUM_GPUS = len(GPUS)
 
-total_batch_size = 2**19
-B = 16
-T = 1024
+total_batch_size = 2**9
+B = 4
+T = 32
 assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B*T"
-grad_accum_steps = total_batch_size // (B * T)
+grad_accum_steps = total_batch_size // (B * T * NUM_GPUS)
 print(f"full batch size: {total_batch_size}, grad_accum_steps: {grad_accum_steps}")
 
-dl = DataLoaderLite(4, 128, "datasets/shake.txt")
-model = GPT2(GPT2Small)
+# train_dl = FineWebDataLoaderLite(B, T, "datasets/shake.txt", "train", GPUS)
+# val_dl = FineWebDataLoaderLite(B, T, "datasets/shake.txt", "train", GPUS)
+train_dl = ShakespeareDataLoaderLite(B, T, "datasets/shake.txt", GPUS)
+val_dl = ShakespeareDataLoaderLite(B, T, "datasets/shake.txt", GPUS)
+model = GPT2(GPT2Small, GPUS)
 for k, x in get_state_dict(model).items():
     x.to_(GPUS)
-
-optim = configure_optimizers(get_parameters(model), 3e-4, .9, .95, 1e-8, .1)
+optim = configure_optimizers(get_parameters(model), 3e-4, 0.9, 0.95, 1e-8, 0.1)
 
 # --------- TRAINING ---------
 
+
 @TinyJit
 def train_step(x, y):
+    logits, loss = model(x, y)
+    loss = loss / grad_accum_steps
+    loss.backward()
+    for p in optim.params:
+        p.grad.realize()
+    return loss.realize()
+
+
+@TinyJit
+def val_step(x, y):
+    logits, loss = model(x, y)
+    for p in optim.params:
+        p.grad.realize()
+    return loss.realize()
+
+
+@TinyJit
+def optim_step():
+    global_norm = Tensor([0.0], dtype=dtypes.float32, device=optim[0].device).realize()
+    for p in optim.params:
+        global_norm += p.grad.float().square().sum()
+    global_norm = global_norm.sqrt()
+    for p in optim.params:
+        p.grad = (p.grad / Tensor.where(global_norm > 1.0, global_norm, 1.0)).cast(
+            p.grad.dtype
+        )
+
+    optim.step()
+    for p in opt.params:
+        p.grad.assign(Tensor.zeros_like(p))
+        p.grad.realize()
+
+
+def full_train_step():
     with Tensor.train():
-        logits, loss = model(x, y)
-        loss = loss / grad_accum_steps
-        loss.backward()
-        return loss
+        full_batch_loss = 0.0
+        for i in range(grad_accum_steps):
+            x, y = train_dl.next_batch()
+            loss = train_step(x, y)
+            full_batch_loss += loss.item()
+        optim_step()
+        return full_batch_loss
 
 
+def full_val_step():
+    with Tensor.inference_mode():
+        full_batch_loss = 0.0
+        for i in range(val_steps):
+            x, y = val_dl.next_batch()
+            loss = val_step(x, y) / val_steps
+            full_batch_loss += loss.item()
+        return full_batch_loss
+
+
+val_loss = None
+enc = tiktoken.get_encoding("gpt2")
 for step in (t := trange(max_steps)):
     t0 = perf_counter_ns()
-    lr = get_lr(step)
+    lr = Tensor([get_lr(step)], device=GPUS, requires_grad=False)
     for opt in optim.optimizers:
-        opt.lr = lr
-    optim.zero_grad()
-    for micro_batch in range(grad_accum_steps):
-        x, y = dl.next_batch()
-        loss = train_step(Tensor(x, dtype=dtypes.long), Tensor(y, dtype=dtypes.long))
-    clip_grad_norm(optim)
-    optim.step()
+        opt.lr.assign(lr)
+    loss = full_train_step()
+    if not (step % 100) and step > 0:
+        val_loss = full_val_step()
+    if not step % 20:
+        model.generate(enc, 2, 32)
     dt = (perf_counter_ns() - t0) * 1e-6
     t.set_description(
-        f"train loss: {loss:.2f} | dt: {dt:.2f} | tok/s {(dl.B*dl.T)/(dt*1e-3):.2f} | lr: {lr:.5f} | norm: {norm:.2f}"
+        f"train loss: {loss:.2f} | prev val loss: {val_loss if val_loss else 'None yet'} dt: {dt:.2f} | tok/s {(train_dl.B*train_dl.T*NUM_GPUS)/(dt*1e-3):.2f} | lr: {lr.item():.5f}"
     )
