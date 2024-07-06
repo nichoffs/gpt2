@@ -8,7 +8,7 @@ from tqdm import trange
 
 from config import TinyStories
 from dataloader import ShardedDataLoaderLite
-from gpt2 import GPT2
+from model import GPT2
 from utils import get_lr, write_generations
 
 # Create the generations directory if it doesn't exist
@@ -73,7 +73,7 @@ for step in (t := trange(max_steps)):
         sequences = model.generate("Lucy went to the store, and she ", encoder)
         write_generations(step, sequences)
 
-    if step % checkpoint_period == 0:
+    if step % checkpoint_period == 0 and step > 0:
         # save by time and step
         current_time = datetime.now().strftime("%b%d%I%M%p")
         checkpoint_dir = f"{current_time}/{step}"

@@ -50,6 +50,7 @@ pyobjc-framework-libdispatch==10.3.1
 pyobjc-framework-Metal==10.3.1
 pyparsing==3.1.2
 python-dateutil==2.9.0.post0
+python-dotenv==1.0.1
 pytz==2024.1
 PyYAML==6.0.1
 pyzmq==26.0.3
@@ -58,7 +59,7 @@ requests==2.32.3
 six==1.16.0
 stack-data==0.6.3
 tiktoken==0.7.0
-tinygrad @ git+https://github.com/tinygrad/tinygrad.git@80ac21200b3f4742c83249a6cfeff93fd950c79c
+tinygrad @ git+https://github.com/tinygrad/tinygrad.git@fc03fc025e14c404c8bc5dc8ded53ba2899d5896
 tornado==6.4.1
 tqdm==4.66.4
 traitlets==5.14.3
