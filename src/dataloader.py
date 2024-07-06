@@ -1,8 +1,9 @@
 # TODO: change to native Tensor
-import numpy as np
 import os
+
+import numpy as np
 import tiktoken
-from tinygrad import dtypes, Tensor
+from tinygrad import Tensor, dtypes
 
 
 class DataLoaderLite:

@@ -1,7 +1,9 @@
-from gpt2 import GPT2
-from config import GPT2Large
 import argparse
+
 import tiktoken
+
+from config import GPT2Large
+from gpt2 import GPT2
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

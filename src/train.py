@@ -1,13 +1,14 @@
+import os
+from time import perf_counter_ns
+
 import tiktoken
 from tinygrad import Tensor, TinyJit, dtypes
 from tqdm import trange
-from time import perf_counter_ns
-import os
 
 from config import TinyStories
+from dataloader import ShardedDataLoaderLite
 from gpt2 import GPT2
 from utils import get_lr, write_generations
-from dataloader import ShardedDataLoaderLite
 
 # Create the generations directory if it doesn't exist
 os.makedirs("./generations", exist_ok=True)

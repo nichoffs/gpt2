@@ -1,15 +1,17 @@
-from tinygrad import Tensor, dtypes, nn
-from tinygrad.nn.optim import AdamW, OptimizerGroup
-from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, torch_load
-from tinygrad.helpers import fetch
-
-from utils import topk
-from config import *
-
 import os
-import numpy as np
-from json import dumps, dump, load, loads
 from dataclasses import asdict
+from json import dump, dumps, load, loads
+
+import numpy as np
+from tinygrad import Tensor, dtypes, nn
+from tinygrad.helpers import fetch
+from tinygrad.nn.optim import AdamW, OptimizerGroup
+from tinygrad.nn.state import (get_parameters, get_state_dict, load_state_dict,
+                               torch_load)
+
+from config import *
+from utils import topk
+
 
 class MLP:
     def __init__(self, config: GPT2Config):
@@ -137,7 +139,6 @@ class GPT2:
                 ret_seqs.append(decoded)
             return ret_seqs
 
-
     def configure_optimizers(self, lr, b1, b2, eps, wd):
         # TODO: do I need to include requires_grad for the count to be correct?
         # Think about this when adding bias for attention
@@ -215,9 +216,6 @@ class GPT2:
             config_dict = {k: getattr(self.config, k) for k in dir(self.config) if not k.startswith('__')}
             config_json = dumps(config_dict)
             dump(config_json, f)
-
-
-
 
     def init_weights(self, param):
         if isinstance(param, nn.Linear):
