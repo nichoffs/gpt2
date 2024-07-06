@@ -29,9 +29,8 @@ def topk(input_, k, device, dim=-1, largest=True, sorted=False):
 # learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
-max_steps = 50
-val_steps = 20
+warmup_steps = 1000
+max_steps = 2441405
 
 
 def get_lr(it):
@@ -48,3 +47,9 @@ def get_lr(it):
         1.0 + math.cos(math.pi * decay_ratio)
     )  # coeff starts at 1 and goes to 0
     return Tensor([min_lr + coeff * (max_lr - min_lr)], requires_grad=False)
+
+def write_generations(step, generations):
+    with open(f"./generations/step_{step}_generations.txt", "w") as f:
+        for i, gen in enumerate(generations):
+            f.write(f"STEP {step} SAMPLE {i}:\n\n")
+            f.write(f"{gen}\n\n")

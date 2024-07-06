@@ -1,6 +1,7 @@
 from tinygrad import Tensor, dtypes, nn
 from tinygrad.nn.optim import AdamW, OptimizerGroup
 from tinygrad.nn.state import get_parameters, load_state_dict, torch_load
+from tinygrad.helpers import fetch
 
 from utils import topk
 from config import *
@@ -125,10 +126,13 @@ class GPT2:
                 ix = topk_probs.multinomial(1)
                 xcol = topk_indices.gather(-1, ix)
                 xgen = xgen.cat(xcol, dim=1)
+            ret_seqs = []
             for i in range(num_return_sequences):
                 tokens = xgen[i, :max_length].tolist()
                 decoded = enc.decode(tokens)
-                print(f"Sample {i + 1}: {decoded}")
+                ret_seqs.append(decoded)
+            return ret_seqs
+
 
     def configure_optimizers(self, lr, b1, b2, eps, wd):
         # TODO: do I need to include requires_grad for the count to be correct?
