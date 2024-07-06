@@ -1,19 +1,25 @@
-
 import os
+
 import numpy as np
 import tiktoken
 from tqdm import tqdm
+
 from datasets import load_dataset
+
 
 def tokenize(doc, enc, eot):
     tokens = [eot]
     tokens.extend(enc.encode_ordinary(doc["text"]))
     tokens_np = np.array(tokens)
-    assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), "token dictionary too large for uint16"
+    assert (0 <= tokens_np).all() and (
+        tokens_np < 2**16
+    ).all(), "token dictionary too large for uint16"
     return tokens_np.astype(np.uint16)
+
 
 def write_datafile(filename, tokens_np):
     np.save(filename, tokens_np)
+
 
 def process_split(split, enc, eot, DATA_CACHE_DIR, shard_size):
     fw = load_dataset("roneneldan/TinyStories", split=split)
@@ -30,10 +36,16 @@ def process_split(split, enc, eot, DATA_CACHE_DIR, shard_size):
             all_tokens_np[token_count : token_count + len(tokens)] = tokens
             token_count += len(tokens)
             if progress_bar is None:
-                progress_bar = tqdm(total=shard_size, unit="tokens", desc=f"{split.capitalize()} Shard {shard_index}")
+                progress_bar = tqdm(
+                    total=shard_size,
+                    unit="tokens",
+                    desc=f"{split.capitalize()} Shard {shard_index}",
+                )
             progress_bar.update(len(tokens))
         else:
-            filename = os.path.join(DATA_CACHE_DIR, f"tinystory_{split}_{shard_index:06d}")
+            filename = os.path.join(
+                DATA_CACHE_DIR, f"tinystory_{split}_{shard_index:06d}"
+            )
             remainder = shard_size - token_count
             progress_bar.update(remainder)
             all_tokens_np[token_count : token_count + remainder] = tokens[:remainder]
@@ -46,6 +58,7 @@ def process_split(split, enc, eot, DATA_CACHE_DIR, shard_size):
     if token_count != 0:
         filename = os.path.join(DATA_CACHE_DIR, f"tinystory_{split}_{shard_index:06d}")
         write_datafile(filename, all_tokens_np[:token_count])
+
 
 def main():
     local_dir = "../datasets/tinystories"
@@ -62,6 +75,7 @@ def main():
 
     # Process validation split
     process_split("validation", enc, eot, DATA_CACHE_DIR, shard_size)
+
 
 if __name__ == "__main__":
     main()

@@ -40,6 +40,7 @@ class DataLoaderLite:
 
         return x, y
 
+
 class ShardedDataLoaderLite:
     def __init__(self, B, T, ds_dir, split="train"):
         self.B = B
@@ -73,9 +74,7 @@ class ShardedDataLoaderLite:
     def next_batch(self):
         B, T = self.B, self.T
 
-        buf = self.tokens[
-            self.current_position : (self.current_position + B * T) + 1
-        ]
+        buf = self.tokens[self.current_position : (self.current_position + B * T) + 1]
         x = self.batch(buf[:-1])
         y = self.batch(buf[1:])
         self.current_position += B * T

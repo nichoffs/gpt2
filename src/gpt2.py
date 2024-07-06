@@ -6,11 +6,16 @@ import numpy as np
 from tinygrad import Tensor, dtypes, nn
 from tinygrad.helpers import fetch
 from tinygrad.nn.optim import AdamW, OptimizerGroup
-from tinygrad.nn.state import (get_parameters, get_state_dict, load_state_dict,
-                               torch_load)
+from tinygrad.nn.state import (
+    get_parameters,
+    get_state_dict,
+    load_state_dict,
+    torch_load,
+)
 
 from config import *
 from utils import topk
+from tiktoken import get_encoding
 
 
 class MLP:
@@ -120,7 +125,7 @@ class GPT2:
 
         return logits[:, -1, :]
 
-    def generate(self, prompt, enc, num_return_sequences, max_length):
+    def generate(self, prompt, enc=get_encoding, num_return_sequences=2, max_length=30):
         tokens = enc.encode(prompt)
         tokens = Tensor(tokens, dtype=dtypes.long)
         xgen = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
@@ -202,18 +207,22 @@ class GPT2:
             config_dict = loads(load(f))
             config = GPT2Config(**config_dict)
         model = GPT2(config)
-        with open(f"checkpoints/{checkpoint_dir}/model"+'.npy', 'rb') as f:
+        with open(f"checkpoints/{checkpoint_dir}/model" + ".npy", "rb") as f:
             for par in get_parameters(model):
                 par.assign(Tensor(np.load(f), dtype=dtypes.float32))
         return model
 
     def save_checkpoint(self, checkpoint_dir):
         os.makedirs(f"checkpoints/{checkpoint_dir}", exist_ok=True)
-        with open(f"checkpoints/{checkpoint_dir}/model"+'.npy', 'wb') as f:
-              for par in get_parameters(self):
+        with open(f"checkpoints/{checkpoint_dir}/model.npy", "wb") as f:
+            for par in get_parameters(self):
                 np.save(f, par.numpy())
         with open(f"checkpoints/{checkpoint_dir}/config.json", "w") as f:
-            config_dict = {k: getattr(self.config, k) for k in dir(self.config) if not k.startswith('__')}
+            config_dict = {
+                k: getattr(self.config, k)
+                for k in dir(self.config)
+                if not k.startswith("__")
+            }
             config_json = dumps(config_dict)
             dump(config_json, f)
 
