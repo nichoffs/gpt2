@@ -18,7 +18,7 @@ model_config = TinyStories()
 model = GPT2(model_config)
 optim = model.configure_optimizers(lr=3e-4, b1=0.9, b2=0.95, eps=1e-8, wd=0.1)
 
-B = 16
+B = 12
 T = model_config.block_size
 train_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "train")
 val_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "val")
@@ -26,9 +26,10 @@ val_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "val")
 encoder = tiktoken.get_encoding("gpt2")
 
 max_steps = int(10e8 // (B * T))
+# max_steps=1000
 
 val_period = 500
-generate_period = 1000
+generate_period = 100
 checkpoint_period = 10000
 
 

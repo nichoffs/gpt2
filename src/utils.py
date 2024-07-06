@@ -29,7 +29,7 @@ def topk(input_, k, device, dim=-1, largest=True, sorted=False):
 # learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 500
+warmup_steps = 100
 
 def get_lr(it, max_steps):
     # 1) linear warmup for warmup_iters steps
@@ -48,7 +48,7 @@ def get_lr(it, max_steps):
 
 
 def write_generations(step, generations):
-    with open(f"./generations/step_{step}_generations.txt", "w") as f:
+    with open(f"./generations/step_{step}_generations.txt", "w", encoding="utf-8") as f:
         for i, gen in enumerate(generations):
             f.write(f"STEP {step} SAMPLE {i}:\n\n")
             f.write(f"{gen}\n\n")
