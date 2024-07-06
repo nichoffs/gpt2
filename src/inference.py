@@ -18,7 +18,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     enc = tiktoken.get_encoding("gpt2")
-    model = GPT2.build(args.model_size)
+    model = GPT2.load_pretrained(args.model_size)
 
     generated_text = model.generate(
         args.prompt,

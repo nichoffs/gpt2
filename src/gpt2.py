@@ -1,11 +1,15 @@
 from tinygrad import Tensor, dtypes, nn
 from tinygrad.nn.optim import AdamW, OptimizerGroup
-from tinygrad.nn.state import get_parameters, load_state_dict, torch_load
+from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, torch_load
 from tinygrad.helpers import fetch
 
 from utils import topk
 from config import *
 
+import os
+import numpy as np
+from json import dumps, dump, load, loads
+from dataclasses import asdict
 
 class MLP:
     def __init__(self, config: GPT2Config):
@@ -169,7 +173,7 @@ class GPT2:
         return optim_group
 
     @staticmethod
-    def build(MODEL_NAME):
+    def load_pretrained(MODEL_NAME):
         weights = torch_load(
             fetch(f"https://huggingface.co/{MODEL_NAME}/resolve/main/pytorch_model.bin")
         )
@@ -180,6 +184,7 @@ class GPT2:
             "mlp.c_fc.weight",
             "mlp.c_proj.weight",
         )
+
         for k in weights:
             if k.endswith(transposed):
                 weights[k] = weights[k].T
@@ -189,6 +194,30 @@ class GPT2:
         load_state_dict(model, weights)
 
         return model
+
+    @staticmethod
+    def from_checkpoint(checkpoint_dir):
+        with open(f"checkpoints/{checkpoint_dir}/config.json", "r") as f:
+            config_dict = loads(load(f))
+            config = GPT2Config(**config_dict)
+        model = GPT2(config)
+        with open(f"checkpoints/{checkpoint_dir}/model"+'.npy', 'rb') as f:
+            for par in get_parameters(model):
+                par.assign(Tensor(np.load(f), dtype=dtypes.float32))
+        return model
+
+    def save_checkpoint(self, checkpoint_dir):
+        os.makedirs(f"checkpoints/{checkpoint_dir}", exist_ok=True)
+        with open(f"checkpoints/{checkpoint_dir}/model"+'.npy', 'wb') as f:
+              for par in get_parameters(self):
+                np.save(f, par.numpy())
+        with open(f"checkpoints/{checkpoint_dir}/config.json", "w") as f:
+            config_dict = {k: getattr(self.config, k) for k in dir(self.config) if not k.startswith('__')}
+            config_json = dumps(config_dict)
+            dump(config_json, f)
+
+
+
 
     def init_weights(self, param):
         if isinstance(param, nn.Linear):
