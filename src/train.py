@@ -13,7 +13,7 @@ from model.model import GPT2
 from model.utils import get_lr, write_generations
 
 
-def main(checkpoint_dir, steps):
+def main(checkpoint_dir, save_dir, steps):
     os.makedirs("./generations", exist_ok=True)
 
     model_config = TinyStories()
@@ -33,7 +33,7 @@ def main(checkpoint_dir, steps):
 
     val_period = 500
     generate_period = 100
-    checkpoint_period = 10000
+    checkpoint_period = 10
     if steps < checkpoint_period:
         print("WARNING: THIS RUN WILL NOT CHECKPOINT")
 
@@ -82,7 +82,7 @@ def main(checkpoint_dir, steps):
             # save by time and step
             current_time = datetime.now().strftime("%b%d%I%M%p")
             checkpoint_dir = f"{current_time}/{step}"
-            model.save_checkpoint(checkpoint_dir)
+            model.save_checkpoint(save_dir + "/" + checkpoint_dir)
 
         dt = (perf_counter_ns() - t0) * 1e-6
         t.set_description(
@@ -94,8 +94,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="training", description="training script based on TinyStories GPT2"
     )
-    parser.add_argument("-c", "--checkpoint_dir", default="", required=False)
+    parser.add_argument("-c", "--checkpoint_load_dir", default="", required=False)
+    parser.add_argument("-p", "--checkpoint_save_dir", default="", required=False)
     parser.add_argument("-s", "--steps", default="", required=False)
     args = parser.parse_args()
 
-    main(args.checkpoint_dir, args.steps)
+    main(args.checkpoint_load_dir, args.checkpoint_save_dir, int(args.steps))

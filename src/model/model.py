@@ -225,11 +225,11 @@ class GPT2:
         return model
 
     def save_checkpoint(self, checkpoint_dir):
-        os.makedirs(f"checkpoints/{checkpoint_dir}", exist_ok=True)
-        with open(f"checkpoints/{checkpoint_dir}/model.npy", "wb") as f:
+        os.makedirs(f"{checkpoint_dir}", exist_ok=True)
+        with open(f"{checkpoint_dir}/model.npy", "wb") as f:
             for par in get_parameters(self):
                 np.save(f, par.numpy())
-        with open(f"checkpoints/{checkpoint_dir}/config.json", "w") as f:
+        with open(f"{checkpoint_dir}/config.json", "w") as f:
             config_dict = {
                 k: getattr(self.config, k)
                 for k in dir(self.config)
