@@ -1,6 +1,6 @@
 import os
-from time import perf_counter_ns
 from datetime import datetime
+from time import perf_counter_ns
 
 import tiktoken
 from tinygrad import Tensor, TinyJit, dtypes
@@ -50,7 +50,6 @@ for step in (t := trange(max_steps)):
     x, y = train_dl.next_batch()
     x, y = Tensor(x.numpy(), dtype=dtypes.long), Tensor(y.numpy(), dtype=dtypes.long)
 
-
     # configure learning rate
     lr = get_lr(step, max_steps)
     for opt in optim.optimizers:
@@ -69,7 +68,7 @@ for step in (t := trange(max_steps)):
                 val_loss_accum += val_loss.item()
         val_loss_accum /= 10
 
-    if step % generate_period  == 0:
+    if step % generate_period == 0:
         # generate some text
         sequences = model.generate("Lucy went to the store, and she ", encoder)
         write_generations(step, sequences)

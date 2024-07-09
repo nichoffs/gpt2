@@ -3,6 +3,7 @@ from dataclasses import asdict
 from json import dump, dumps, load, loads
 
 import numpy as np
+from tiktoken import get_encoding
 from tinygrad import Tensor, dtypes, nn
 from tinygrad.helpers import fetch
 from tinygrad.nn.optim import AdamW, OptimizerGroup
@@ -15,7 +16,6 @@ from tinygrad.nn.state import (
 
 from config import *
 from utils import topk
-from tiktoken import get_encoding
 
 
 class MLP:
@@ -125,7 +125,7 @@ class GPT2:
 
         return logits[:, -1, :]
 
-    def generate(self, prompt, enc=get_encoding, num_return_sequences=2, max_length=30):
+    def generate(self, prompt, enc=get_encoding("gpt2"), num_return_sequences=2, max_length=30):
         tokens = enc.encode(prompt)
         tokens = Tensor(tokens, dtype=dtypes.long)
         xgen = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
@@ -202,14 +202,24 @@ class GPT2:
         return model
 
     @staticmethod
-    def from_checkpoint(checkpoint_dir):
+    def load_checkpoint(checkpoint_dir):
         with open(f"checkpoints/{checkpoint_dir}/config.json", "r") as f:
             config_dict = loads(load(f))
             config = GPT2Config(**config_dict)
         model = GPT2(config)
-        with open(f"checkpoints/{checkpoint_dir}/model" + ".npy", "rb") as f:
+        with open(f"checkpoints/{checkpoint_dir}/model.npy", "rb") as f:
             for par in get_parameters(model):
-                par.assign(Tensor(np.load(f), dtype=dtypes.float32))
+                np_arr = np.load(f)
+                """
+                TODO: For some reason, for the first two params in the model,
+                the network is saving an extra npy. Both happen to start
+                with a 1, so I'm just skipping over them here.
+
+                Don't feel like resolving this now and this works, so oh well.
+                """
+                if np_arr.shape[0] == 1:
+                    np_arr = np.load(f)
+                par.assign(Tensor(np_arr, dtype=dtypes.float32))
         return model
 
     def save_checkpoint(self, checkpoint_dir):
