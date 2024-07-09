@@ -24,7 +24,7 @@ def main(checkpoint_dir, save_dir, steps):
     )
     optim = model.configure_optimizers(lr=3e-4, b1=0.9, b2=0.95, eps=1e-8, wd=0.1)
 
-    B = 12
+    B = 64
     T = model_config.block_size
     train_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "train")
     val_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "val")
@@ -32,8 +32,8 @@ def main(checkpoint_dir, save_dir, steps):
     encoder = tiktoken.get_encoding("gpt2")
 
     val_period = 500
-    generate_period = 100
-    checkpoint_period = 10
+    generate_period = 300
+    checkpoint_period = 1000
     if steps < checkpoint_period:
         print("WARNING: THIS RUN WILL NOT CHECKPOINT")
 
