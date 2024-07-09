@@ -1,5 +1,11 @@
-from config import GPT2Small, TinyStories
-from model import GPT2
+# from src.config import GPT2Small, TinyStories
+import os
+import sys
+from sys import exit
+from textwrap import wrap
+
+from model.config import TinyStories
+from model.model import GPT2
 
 prompt = "Once upon a time"
 
@@ -9,7 +15,7 @@ def pretrain_gen():
     pretrained_gen = model_pretrained.generate(
         prompt, num_return_sequences=1, max_length=100
     )[0]
-    return pretrained_gen
+    return wrap(pretrained_gen)
 
 
 def checkpoint_gen():
@@ -17,13 +23,14 @@ def checkpoint_gen():
     checkpoint_gen = model_checkpoint.generate(
         prompt, num_return_sequences=1, max_length=100
     )[0]
-    return checkpoint_gen
+    return wrap(checkpoint_gen)
 
 
 with open("generation.txt", "w") as f:
+    nl = "\n"
     f.write(
         f"""
-Pretrained Generation: {pretrain_gen()}
-Checkpointed Generation: {checkpoint_gen()}
+Pretrained Generation: {nl.join(pretrain_gen())}
+Checkpointed Generation: {nl.join(checkpoint_gen())}
             """
     )

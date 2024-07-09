@@ -4,3 +4,9 @@ pyrightconfig.json
 __pycache__/
 datasets/
 checkpoints/
+generations/
+eggs/
+.eggs/
+*.egg-info/
+
+

@@ -2,8 +2,8 @@ import argparse
 
 import tiktoken
 
-from config import GPT2Large
-from model import GPT2
+from model.config import GPT2Large
+from model.model import GPT2
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

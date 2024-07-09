@@ -14,8 +14,8 @@ from tinygrad.nn.state import (
     torch_load,
 )
 
-from config import *
-from utils import topk
+from model.config import *
+from model.utils import topk
 
 
 class MLP:
@@ -125,7 +125,9 @@ class GPT2:
 
         return logits[:, -1, :]
 
-    def generate(self, prompt, enc=get_encoding("gpt2"), num_return_sequences=2, max_length=30):
+    def generate(
+        self, prompt, enc=get_encoding("gpt2"), num_return_sequences=2, max_length=30
+    ):
         tokens = enc.encode(prompt)
         tokens = Tensor(tokens, dtype=dtypes.long)
         xgen = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
