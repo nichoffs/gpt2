@@ -209,7 +209,7 @@ class GPT2:
             config_dict = loads(load(f))
             config = GPT2Config(**config_dict)
         model = GPT2(config)
-        with open(f"checkpoints/{checkpoint_dir}/model.npy", "rb") as f:
+        with open(f"{checkpoint_dir}/model.npy", "rb") as f:
             for par in get_parameters(model):
                 np_arr = np.load(f)
                 """
