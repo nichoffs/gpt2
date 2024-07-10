@@ -24,7 +24,7 @@ def main(checkpoint_dir, save_dir, steps):
     )
     optim = model.configure_optimizers(lr=3e-4, b1=0.9, b2=0.95, eps=1e-8, wd=0.1)
 
-    B = 64
+    B = 4
     T = model_config.block_size
     train_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "train")
     val_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "val")
@@ -33,7 +33,7 @@ def main(checkpoint_dir, save_dir, steps):
 
     val_period = 500
     generate_period = 300
-    checkpoint_period = 1000
+    checkpoint_period = 10
     if steps < checkpoint_period:
         print("WARNING: THIS RUN WILL NOT CHECKPOINT")
 
@@ -51,8 +51,9 @@ def main(checkpoint_dir, save_dir, steps):
 
         # load data and change buffer so JIT works
         x, y = train_dl.next_batch()
-        x, y = Tensor(x.numpy(), dtype=dtypes.long), Tensor(
-            y.numpy(), dtype=dtypes.long
+        x, y = (
+            Tensor(x.numpy(), dtype=dtypes.long),
+            Tensor(y.numpy(), dtype=dtypes.long),
         )
 
         # configure learning rate
@@ -80,9 +81,7 @@ def main(checkpoint_dir, save_dir, steps):
 
         if step % checkpoint_period == 0 and step > 0:
             # save by time and step
-            current_time = datetime.now().strftime("%b%d%I%M%p")
-            checkpoint_dir = f"{current_time}/{step}"
-            model.save_checkpoint(save_dir + "/" + checkpoint_dir)
+            model.save_checkpoint(save_dir + "/" + str(step))
 
         dt = (perf_counter_ns() - t0) * 1e-6
         t.set_description(
