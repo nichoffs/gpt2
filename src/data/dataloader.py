@@ -42,7 +42,7 @@ class DataLoaderLite:
 
 
 class ShardedDataLoaderLite:
-    def __init__(self, B, T, ds_dir, split="train"):
+    def __init__(self, B, T, ds_dir, split="train", current_shard=0):
         self.B = B
         self.T = T
 
@@ -57,7 +57,7 @@ class ShardedDataLoaderLite:
         assert len(shards) > 0, f"no shards found for split {split}"
         print(f"found {len(shards)} shards for split {split}")
 
-        self.reset()
+        self.reset(current_shard)
 
     def load_tokens(self, filename):
         npt = np.load(filename)
@@ -65,9 +65,9 @@ class ShardedDataLoaderLite:
         ptt = Tensor(npt, dtype=dtypes.long)
         return ptt
 
-    def reset(self):
+    def reset(self, current_shard):
         # state, init at shard zero
-        self.current_shard = 0
+        self.current_shard = current_shard
         self.tokens = self.load_tokens(self.shards[self.current_shard])
         self.current_position = 0
 

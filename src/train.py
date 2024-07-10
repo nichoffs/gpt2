@@ -13,7 +13,7 @@ from model.model import GPT2
 from model.utils import get_lr, write_generations
 
 
-def main(checkpoint_dir, save_dir, steps):
+def main(checkpoint_dir, save_dir, steps, dataset_dir, dataset_shard):
     os.makedirs("./generations", exist_ok=True)
 
     model_config = TinyStories()
@@ -26,8 +26,8 @@ def main(checkpoint_dir, save_dir, steps):
 
     B = 4
     T = model_config.block_size
-    train_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "train")
-    val_dl = ShardedDataLoaderLite(B, T, "datasets/tinystories", "val")
+    train_dl = ShardedDataLoaderLite(B, T, dataset_dir, "train", dataset_shard)
+    val_dl = ShardedDataLoaderLite(B, T, dataset_dir, "val")
 
     encoder = tiktoken.get_encoding("gpt2")
 
@@ -94,8 +94,17 @@ if __name__ == "__main__":
         prog="training", description="training script based on TinyStories GPT2"
     )
     parser.add_argument("-c", "--checkpoint_load_dir", default="", required=False)
-    parser.add_argument("-p", "--checkpoint_save_dir", default="", required=False)
-    parser.add_argument("-s", "--steps", default="", required=False)
+    parser.add_argument("-p", "--checkpoint_save_dir")
+    parser.add_argument("-s", "--steps", default="100", required=False)
+    parser.add_argument("-d", "--dataset_dir")
+    parser.add_argument("-l", "--dataset_shard", default="0", required=False)
+
     args = parser.parse_args()
 
-    main(args.checkpoint_load_dir, args.checkpoint_save_dir, int(args.steps))
+    main(
+        args.checkpoint_load_dir,
+        args.checkpoint_save_dir,
+        int(args.steps),
+        args.dataset_dir,
+        int(args.dataset_shard),
+    )
