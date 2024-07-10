@@ -205,7 +205,7 @@ class GPT2:
 
     @staticmethod
     def load_checkpoint(checkpoint_dir):
-        with open(f"checkpoints/{checkpoint_dir}/config.json", "r") as f:
+        with open(f"{checkpoint_dir}/config.json", "r") as f:
             config_dict = loads(load(f))
             config = GPT2Config(**config_dict)
         model = GPT2(config)
