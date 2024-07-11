@@ -141,7 +141,10 @@ class GPT2:
                 xgen = xgen.cat(xcol, dim=1)
             ret_seqs = []
             for i in range(num_return_sequences):
-                tokens = xgen[i, :max_length].tolist()
+                tokens = xgen[i].tolist()
+                # Find the index of EOT token if present, otherwise use all tokens up to max_length
+                eot_index = tokens.index(50256) if 50256 in tokens else max_length
+                tokens = tokens[:eot_index]  # Slice until EOT token or max_length
                 decoded = enc.decode(tokens)
                 ret_seqs.append(decoded)
             return ret_seqs
