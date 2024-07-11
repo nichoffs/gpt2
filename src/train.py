@@ -24,7 +24,7 @@ def main(checkpoint_dir, save_dir, steps, dataset_dir, dataset_shard):
     )
     optim = model.configure_optimizers(lr=3e-4, b1=0.9, b2=0.95, eps=1e-8, wd=0.1)
 
-    B = 4
+    B = 128
     T = model_config.block_size
     train_dl = ShardedDataLoaderLite(B, T, dataset_dir, "train", dataset_shard)
     val_dl = ShardedDataLoaderLite(B, T, dataset_dir, "val")
@@ -33,7 +33,7 @@ def main(checkpoint_dir, save_dir, steps, dataset_dir, dataset_shard):
 
     val_period = 500
     generate_period = 300
-    checkpoint_period = 10
+    checkpoint_period = 5000
     if steps < checkpoint_period:
         print("WARNING: THIS RUN WILL NOT CHECKPOINT")
 
